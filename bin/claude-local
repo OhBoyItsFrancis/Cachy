@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Run Claude Code against a local Ollama model on the RTX 3080.
+#
+#   claude-local                       # default model from /etc/cachy-ai.conf
+#   claude-local --model qwen3-coder:30b
+#   claude-local -p "explain this repo"  (any other claude args pass through)
+#
+# Uses Ollama's Anthropic-compatible endpoint, so no proxy is needed. Your
+# normal `claude` (cloud) setup is untouched: these variables only apply to
+# this process.
+set -euo pipefail
+
+[[ -f /etc/cachy-ai.conf ]] && source /etc/cachy-ai.conf
+MODEL="${OLLAMA_MODEL:-qwen3-coder:30b}"
+args=()
+while (($#)); do
+    case "$1" in
+        --model) MODEL="$2"; shift 2 ;;
+        --model=*) MODEL="${1#*=}"; shift ;;
+        *) args+=("$1"); shift ;;
+    esac
+done
+
+HOST="${OLLAMA_HOST:-http://127.0.0.1:11434}"
+if ! curl -fsS --max-time 3 "$HOST/api/version" >/dev/null; then
+    echo "Ollama isn't answering at $HOST." >&2
+    echo "Start it: sudo systemctl start ollama  (it is stopped while the passthrough VM runs)" >&2
+    exit 1
+fi
+if ! ollama show "$MODEL" >/dev/null 2>&1; then
+    echo "Pulling $MODEL (first use only)..."
+    ollama pull "$MODEL"
+fi
+
+export ANTHROPIC_BASE_URL="$HOST"
+export ANTHROPIC_AUTH_TOKEN="ollama"
+export ANTHROPIC_API_KEY=""
+export ANTHROPIC_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="$MODEL"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="$MODEL"
+export CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1
+exec claude --model "$MODEL" "${args[@]}"

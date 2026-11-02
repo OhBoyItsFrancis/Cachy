@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""cachy-vm: create and manage the Windows 11 passthrough VM.
+
+  sudo cachy-vm create --iso ~/Downloads/Win11_24H2_English_x64.iso
+        Defines a Windows 11 VM (Q35, Secure Boot OVMF, TPM 2.0, virtio disk/net,
+        pinned vCPUs) with SPICE graphics, so Windows can be installed in a window.
+  sudo cachy-vm passthrough on     Swap SPICE for the RTX 3080 (+ HDMI audio) and,
+                                   if enabled, the PCIe USB card.
+  sudo cachy-vm passthrough off    Back to SPICE graphics (for maintenance).
+  sudo cachy-vm start | stop | status
+
+Settings come from /etc/cachy-vfio.conf (written by post-install.sh).
+"""
+import argparse
+import glob
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import urllib.request
+import xml.etree.ElementTree as ET
+
+CONF = "/etc/cachy-vfio.conf"
+IMAGES = "/var/lib/libvirt/images"
+VIRTIO_URL = ("https://fedorapeople.org/groups/virt/virtio-win/"
+              "direct-downloads/stable-virtio/virtio-win.iso")
+URI = "qemu:///system"
+
+
+def read_conf(path=CONF):
+    conf = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            lines = f.readlines()
+        for line in lines:
+            m = re.match(r'^\s*([A-Z_][A-Z0-9_]*)=(.*)$', line)
+            if m:
+                conf[m.group(1)] = m.group(2).strip().strip('"').strip("'")
+    return conf
+
+
+def run(*cmd, check=True, capture=False):
+    return subprocess.run(cmd, check=check, text=True,
+                          stdout=subprocess.PIPE if capture else None)
+
+
+def virsh(*args, check=True, capture=False):
+    return run("virsh", "-c", URI, *args, check=check, capture=capture)
+
+
+# ---- CPU pinning -----------------------------------------------------------------------
+
+def cpu_cores(sysfs="/sys/devices/system/cpu"):
+    """List of sibling tuples per physical core, e.g. [(0, 8), (1, 9), ...]."""
+    cores = set()
+    for p in glob.glob(f"{sysfs}/cpu[0-9]*/topology/thread_siblings_list"):
+        with open(p) as f:
+            cores.add(tuple(parse_cpulist(f.read().strip())))
+    return sorted(cores)
+
+
+def parse_cpulist(s):
+    out = []
+    for part in s.split(","):
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-")
+            out.extend(range(int(a), int(b) + 1))
+        else:
+            out.append(int(part))
+    return out
+
+
+def plan_pinning(cores, host_cpus, want_cores):
+    """Pick want_cores physical cores that don't overlap host_cpus.
+    Returns (pins [(vcpu, hostcpu)], threads_per_core)."""
+    host = set(host_cpus)
+    free = [c for c in cores if not host & set(c)]
+    chosen = free[:want_cores]
+    if not chosen:
+        raise SystemExit("no free cores for the VM; check HOST_CPUS / VM_VCPU_CORES")
+    threads = len(chosen[0])
+    pins, v = [], 0
+    for core in chosen:
+        for cpu in core:
+            pins.append((v, cpu))
+            v += 1
+    return pins, threads
+
+
+# ---- domain XML --------------------------------------------------------------------------
+
+def domain_xml(name, mem_gib, disk, iso, virtio_iso, pins, threads, host_cpus):
+    vcpus = len(pins)
+    cores = vcpus // threads
+    pin_xml = "\n".join(f"    <vcpupin vcpu='{v}' cpuset='{c}'/>" for v, c in pins)
+    hostset = ",".join(str(c) for c in host_cpus)
+    cdroms = ""
+    for dev, path in (("sda", iso), ("sdb", virtio_iso)):
+        if path:
+            cdroms += f"""
+    <disk type='file' device='cdrom'>
+      <driver name='qemu' type='raw'/>
+      <source file='{path}'/>
+      <target dev='{dev}' bus='sata'/>
+      <readonly/>
+    </disk>"""
+    return f"""<domain type='kvm'>
+  <name>{name}</name>
+  <metadata>
+    <libosinfo:libosinfo xmlns:libosinfo="http://libosinfo.org/xmlns/libvirt/domain/1.0">
+      <libosinfo:os id="http://microsoft.com/win/11"/>
+    </libosinfo:libosinfo>
+  </metadata>
+  <memory unit='GiB'>{mem_gib}</memory>
+  <currentMemory unit='GiB'>{mem_gib}</currentMemory>
+  <vcpu placement='static'>{vcpus}</vcpu>
+  <iothreads>1</iothreads>
+  <cputune>
+{pin_xml}
+    <emulatorpin cpuset='{hostset}'/>
+    <iothreadpin iothread='1' cpuset='{hostset}'/>
+  </cputune>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='q35'>hvm</type>
+    <firmware>
+      <feature enabled='yes' name='enrolled-keys'/>
+      <feature enabled='yes' name='secure-boot'/>
+    </firmware>
+    <loader readonly='yes' secure='yes' type='pflash'/>
+    <boot dev='hd'/>
+    <boot dev='cdrom'/>
+  </os>
+  <features>
+    <acpi/>
+    <apic/>
+    <hyperv mode='custom'>
+      <relaxed state='on'/>
+      <vapic state='on'/>
+      <spinlocks state='on' retries='8191'/>
+      <vpindex state='on'/>
+      <runtime state='on'/>
+      <synic state='on'/>
+      <stimer state='on'/>
+      <reset state='on'/>
+      <vendor_id state='on' value='cachyvm0001'/>
+      <frequencies state='on'/>
+      <tlbflush state='on'/>
+      <ipi state='on'/>
+    </hyperv>
+    <kvm>
+      <hidden state='on'/>
+    </kvm>
+    <vmport state='off'/>
+    <smm state='on'/>
+    <ioapic driver='kvm'/>
+  </features>
+  <cpu mode='host-passthrough' check='none' migratable='off'>
+    <topology sockets='1' dies='1' clusters='1' cores='{cores}' threads='{threads}'/>
+    <cache mode='passthrough'/>
+    <feature policy='require' name='topoext'/>
+  </cpu>
+  <clock offset='localtime'>
+    <timer name='rtc' tickpolicy='catchup'/>
+    <timer name='pit' tickpolicy='delay'/>
+    <timer name='hpet' present='no'/>
+    <timer name='hypervclock' present='yes'/>
+  </clock>
+  <on_poweroff>destroy</on_poweroff>
+  <on_reboot>restart</on_reboot>
+  <on_crash>destroy</on_crash>
+  <pm>
+    <suspend-to-mem enabled='no'/>
+    <suspend-to-disk enabled='no'/>
+  </pm>
+  <devices>
+    <emulator>/usr/bin/qemu-system-x86_64</emulator>
+    <disk type='file' device='disk'>
+      <driver name='qemu' type='qcow2' cache='none' io='native' discard='unmap' iothread='1'/>
+      <source file='{disk}'/>
+      <target dev='vda' bus='virtio'/>
+    </disk>{cdroms}
+    <controller type='usb' model='qemu-xhci' ports='15'/>
+    <interface type='network'>
+      <source network='default'/>
+      <model type='virtio'/>
+    </interface>
+    <input type='tablet' bus='usb'/>
+    <input type='mouse' bus='ps2'/>
+    <input type='keyboard' bus='ps2'/>
+    <tpm model='tpm-crb'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>
+{spice_devices()}
+    <memballoon model='none'/>
+  </devices>
+</domain>
+"""
+
+
+def spice_devices():
+    return """    <graphics type='spice' autoport='yes'>
+      <listen type='address'/>
+      <image compression='off'/>
+    </graphics>
+    <video>
+      <model type='virtio' heads='1' primary='yes'/>
+    </video>
+    <channel type='spicevmc'>
+      <target type='virtio' name='com.redhat.spice.0'/>
+    </channel>
+    <sound model='ich9'/>"""
+
+
+def slot_functions(addr, sysfs="/sys/bus/pci/devices"):
+    """All functions in the same slot: 0000:01:00.0 -> [0000:01:00.0, 0000:01:00.1]."""
+    base = addr.rsplit(".", 1)[0]
+    funcs = sorted(os.path.basename(p) for p in glob.glob(f"{sysfs}/{base}.*"))
+    return funcs or [addr]
+
+
+def hostdev_element(addr, rom=None):
+    dom, bus, rest = addr.split(":")
+    slot, fn = rest.split(".")
+    hd = ET.Element("hostdev", mode="subsystem", type="pci", managed="yes")
+    src = ET.SubElement(hd, "source")
+    ET.SubElement(src, "address", domain=f"0x{dom}", bus=f"0x{bus}",
+                  slot=f"0x{slot}", function=f"0x{fn}")
+    if rom:
+        ET.SubElement(hd, "rom", file=rom)
+    return hd
+
+
+def set_passthrough(root, enable, gpu_funcs, usb_funcs, rom=None):
+    """Mutate a domain XML tree in place. Idempotent."""
+    devices = root.find("devices")
+    # always start from a clean state: drop our hostdevs + display devices
+    managed = set(gpu_funcs) | set(usb_funcs)
+    for hd in devices.findall("hostdev"):
+        a = hd.find("source/address")
+        if a is None or hd.get("type") != "pci":
+            continue
+        key = "%s:%s:%s.%s" % tuple(a.get(k)[2:] for k in ("domain", "bus", "slot", "function"))
+        if key in managed:
+            devices.remove(hd)
+    for tag in ("graphics", "video", "sound", "audio"):
+        for el in devices.findall(tag):
+            devices.remove(el)
+    for ch in devices.findall("channel"):
+        if ch.get("type") == "spicevmc":
+            devices.remove(ch)
+    for inp in devices.findall("input"):
+        if inp.get("type") == "tablet":
+            devices.remove(inp)
+
+    if enable:
+        video = ET.SubElement(devices, "video")
+        ET.SubElement(video, "model", type="none")
+        for i, f in enumerate(gpu_funcs):
+            devices.append(hostdev_element(f, rom if i == 0 else None))
+        for f in usb_funcs:
+            devices.append(hostdev_element(f))
+    else:
+        frag = ET.fromstring("<devices>" + spice_devices() + "</devices>")
+        for el in frag:
+            devices.append(el)
+        ET.SubElement(devices, "input", type="tablet", bus="usb")
+    # memballoon must stay last-ish for readability only; libvirt doesn't care
+    return root
+
+
+# ---- commands --------------------------------------------------------------------------
+
+def need_root():
+    if os.geteuid() != 0:
+        sys.exit("run with sudo")
+
+
+def domain_exists(name):
+    return virsh("dominfo", name, check=False, capture=True).returncode == 0
+
+
+def cmd_create(a, conf):
+    need_root()
+    name = a.name or conf.get("VM_NAME", "win11")
+    if domain_exists(name):
+        sys.exit(f"domain {name} already exists (virsh undefine --nvram --tpm {name} to remove)")
+    iso = os.path.abspath(a.iso) if a.iso else None
+    if iso and not os.path.isfile(iso):
+        sys.exit(f"ISO not found: {iso}")
+    if not iso:
+        print("No --iso given: Download Windows 11 from https://www.microsoft.com/software-download/windows11")
+        print("and re-run with --iso, or attach it later in virt-manager.")
+    os.makedirs(IMAGES, exist_ok=True)
+    # copy the ISO next to the disk so libvirt (qemu user) can read it
+    if iso and not iso.startswith(IMAGES):
+        dst = os.path.join(IMAGES, os.path.basename(iso))
+        if not os.path.exists(dst):
+            print(f"copying {iso} -> {dst}")
+            shutil.copy2(iso, dst)
+        iso = dst
+    virtio_iso = os.path.join(IMAGES, "virtio-win.iso")
+    if not os.path.exists(virtio_iso):
+        print("downloading virtio-win drivers ...")
+        tmp = virtio_iso + ".part"
+        urllib.request.urlretrieve(VIRTIO_URL, tmp)
+        os.replace(tmp, virtio_iso)
+    disk = os.path.join(IMAGES, f"{name}.qcow2")
+    if not os.path.exists(disk):
+        size = a.disk or conf.get("VM_DISK_GB", "256")
+        run("qemu-img", "create", "-f", "qcow2", "-o", "cluster_size=64k", disk, f"{size}G")
+
+    host_cpus = parse_cpulist(conf.get("HOST_CPUS", "0,8"))
+    pins, threads = plan_pinning(cpu_cores(), host_cpus, int(a.cores or conf.get("VM_VCPU_CORES", "7")))
+    mem = a.memory or conf.get("VM_MEMORY_GB", "16")
+    xml = domain_xml(name, mem, disk, iso, virtio_iso, pins, threads, host_cpus)
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
+        f.write(xml)
+    virsh("define", f.name)
+    os.unlink(f.name)
+    print(f"""
+Defined '{name}' ({len(pins)} vCPUs pinned to {[c for _, c in pins]}, {mem} GiB RAM, SPICE graphics).
+Install Windows: open virt-manager, start '{name}'.
+  * At "Where do you want to install Windows?" click Load driver ->
+    E:\\viostor\\w11\\amd64 (disk) and E:\\NetKVM\\w11\\amd64 (network).
+  * After setup run E:\\virtio-win-guest-tools.exe.
+  * Install the NVIDIA driver in Windows (or let Windows Update do it).
+Then shut Windows down and run:  sudo cachy-vm passthrough on
+""")
+
+
+def cmd_passthrough(a, conf):
+    need_root()
+    name = a.name or conf.get("VM_NAME", "win11")
+    if not domain_exists(name):
+        sys.exit(f"domain {name} not found, run: sudo cachy-vm create --iso ...")
+    state = virsh("domstate", name, capture=True).stdout.strip()
+    if state not in ("shut off", ""):
+        sys.exit(f"{name} is {state}; shut it down first")
+    gpu = conf.get("GPU_PCI")
+    if not gpu:
+        sys.exit("GPU_PCI not set in " + CONF)
+    gpu_funcs = slot_functions(gpu)
+    usb = conf.get("USB_CONTROLLER_PCI", "")
+    use_usb = conf.get("PASSTHROUGH_USB_CONTROLLER", "true").lower() in ("1", "true", "yes", "on")
+    usb_funcs = [usb] if (usb and use_usb) else []
+    rom = conf.get("GPU_ROM_FILE") or None
+
+    xml = virsh("dumpxml", "--inactive", "--security-info", name, capture=True).stdout
+    root = ET.fromstring(xml)
+    set_passthrough(root, a.state == "on", gpu_funcs, usb_funcs, rom)
+    with tempfile.NamedTemporaryFile("w", suffix=".xml", delete=False) as f:
+        f.write(ET.tostring(root, encoding="unicode"))
+    virsh("define", f.name)
+    os.unlink(f.name)
+    if a.state == "on":
+        print(f"{name}: passthrough ON  (GPU {', '.join(gpu_funcs)}"
+              + (f"; USB card {usb}" if usb_funcs else "") + ")")
+        print(f"Mode is '{conf.get('MODE')}'. "
+              + ("Starting the VM will log you out of Cinnamon until Windows shuts down."
+                 if conf.get("MODE") == "single" else
+                 "Close apps using the 3080 (nvtop, CUDA) before starting the VM."))
+    else:
+        print(f"{name}: passthrough OFF (SPICE graphics)")
+
+
+def cmd_simple(a, conf):
+    name = a.name or conf.get("VM_NAME", "win11")
+    if a.cmd == "start":
+        virsh("start", name)
+    elif a.cmd == "stop":
+        virsh("shutdown", name)
+    else:
+        virsh("dominfo", name, check=False)
+        x = virsh("dumpxml", name, check=False, capture=True).stdout or ""
+        print("passthrough:", "on" if "<hostdev" in x else "off", "| mode:", conf.get("MODE"))
+
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    c = sub.add_parser("create")
+    c.add_argument("--iso")
+    c.add_argument("--name")
+    c.add_argument("--memory", help="GiB")
+    c.add_argument("--disk", help="GiB")
+    c.add_argument("--cores", help="physical cores for the guest")
+    pt = sub.add_parser("passthrough")
+    pt.add_argument("state", choices=["on", "off"])
+    pt.add_argument("--name")
+    for s in ("start", "stop", "status"):
+        sub.add_parser(s).add_argument("--name")
+    a = p.parse_args(argv)
+    conf = read_conf()
+    {"create": cmd_create, "passthrough": cmd_passthrough}.get(a.cmd, cmd_simple)(a, conf)
+
+
+if __name__ == "__main__":
+    main()

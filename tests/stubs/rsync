@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+src="${@: -2:1}" dst="${@: -1}"; mkdir -p "$dst"
+( cd "$src" && tar --exclude=.git -cf - . ) | ( cd "$dst" && tar -xf - )

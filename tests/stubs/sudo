@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# drop sudo options, run the command directly
+while [[ "$1" == -* ]]; do case "$1" in -u) shift 2 ;; *) shift ;; esac; done
+exec "$@"

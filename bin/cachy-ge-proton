@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Install (or update to) the newest GE-Proton release for the current user.
+#   cachy-ge-proton            install latest if missing
+#   cachy-ge-proton --keep N   also remove all but the N newest GE-Proton builds (default 3)
+set -euo pipefail
+
+KEEP=3
+[[ "${1:-}" == "--keep" ]] && KEEP="${2:?number}"
+[[ $EUID -eq 0 ]] && { echo "run as your user, not root" >&2; exit 1; }
+
+DEST="$HOME/.local/share/Steam/compatibilitytools.d"
+mkdir -p "$DEST"
+
+api="https://api.github.com/repos/GloriousEggroll/proton-ge-custom/releases/latest"
+json="$(curl -fsSL --retry 3 "$api")"
+tag="$(jq -r .tag_name <<<"$json")"
+[[ -n "$tag" && "$tag" != null ]] || { echo "could not read latest GE-Proton release" >&2; exit 1; }
+
+if [[ -d "$DEST/$tag" ]]; then
+    echo "$tag already installed"
+else
+    tar_url="$(jq -r '.assets[] | select(.name | endswith(".tar.gz")) | .browser_download_url' <<<"$json" | head -n1)"
+    sum_url="$(jq -r '.assets[] | select(.name | endswith(".sha512sum")) | .browser_download_url' <<<"$json" | head -n1)"
+    tmp="$(mktemp -d)"
+    trap 'rm -rf "$tmp"' EXIT
+    echo "downloading $tag"
+    curl -fL --retry 3 -o "$tmp/$tag.tar.gz" "$tar_url"
+    if [[ -n "$sum_url" && "$sum_url" != null ]]; then
+        curl -fsSL --retry 3 -o "$tmp/$tag.sha512sum" "$sum_url"
+        (cd "$tmp" && sha512sum -c "$tag.sha512sum")
+    fi
+    tar -xzf "$tmp/$tag.tar.gz" -C "$DEST"
+    echo "installed $tag -> $DEST (restart Steam, then pick it under Properties > Compatibility)"
+fi
+
+# prune old GE builds
+mapfile -t builds < <(find "$DEST" -maxdepth 1 -mindepth 1 -type d -name 'GE-Proton*' -printf '%f\n' | sort -V -r)
+for old in "${builds[@]:$KEEP}"; do
+    echo "removing old $old"
+    rm -rf "${DEST:?}/$old"
+done

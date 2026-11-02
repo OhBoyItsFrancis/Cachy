@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# libvirt QEMU hook (cachy-setup). Based on the flow of
+# github.com/ilayna/Single-GPU-passthrough-amd-nvidia (risingprismtv), adapted
+# for a machine that also has an AMD iGPU and for single/hybrid modes.
+#
+# libvirt calls: qemu <domain> <operation> <sub-op> <extra>, domain XML on stdin.
+# NOTE: hooks must never call back into libvirt (virsh), it deadlocks.
+set -u
+
+DOMAIN="$1" OPERATION="$2"
+CONF=/etc/cachy-vfio.conf
+LOG=/var/log/libvirt/cachy-vfio.log
+[[ -f "$CONF" ]] || exit 0
+# shellcheck source=/dev/null
+source "$CONF"
+
+# Only act on our VMs
+[[ " ${VM_NAMES:-} " == *" $DOMAIN "* ]] || exit 0
+[[ "$OPERATION" == prepare || "$OPERATION" == release ]] || exit 0
+
+# Only do the GPU dance if this domain actually has the 3080 attached, so the
+# same VM can still be booted with SPICE graphics (e.g. for Windows setup).
+xml="$(cat)"
+addr="${GPU_PCI#*:}"                     # 01:00.0
+bus="${addr%%:*}" slot="${addr#*:}"; slot="${slot%%.*}"
+if ! grep -Eq "<address domain=['\"]0x0000['\"] bus=['\"]0x${bus}['\"] slot=['\"]0x${slot}['\"]" <<<"$xml"; then
+    exit 0
+fi
+
+case "$OPERATION" in
+    prepare) /usr/local/lib/cachy-vfio/vfio-prepare.sh "$DOMAIN" >>"$LOG" 2>&1 ;;
+    release) /usr/local/lib/cachy-vfio/vfio-release.sh "$DOMAIN" >>"$LOG" 2>&1 ;;
+esac

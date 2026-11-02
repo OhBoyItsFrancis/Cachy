@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/_log"
+case "$1" in is-active|is-enabled) exit 1 ;; show) echo lightdm.service ;; esac
+exit 0

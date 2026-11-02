@@ -1,0 +1,2 @@
+#!/usr/bin/env bash
+if [[ "$*" == "-no FSTYPE /" ]]; then echo btrfs; else exec /usr/bin/findmnt "$@"; fi

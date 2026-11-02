@@ -1,0 +1,60 @@
+#!/usr/bin/env bash
+# Show everything that matters for passthrough on this machine:
+# IOMMU state, IOMMU groups of the GPU and USB card, and current config.
+set -uo pipefail
+CONF=/etc/cachy-vfio.conf
+# shellcheck source=/dev/null
+[[ -f "$CONF" ]] && source "$CONF"
+bold=$'\e[1m' red=$'\e[31m' grn=$'\e[32m' ylw=$'\e[33m' rst=$'\e[0m'
+
+echo "${bold}Kernel command line${rst}: $(cat /proc/cmdline)"
+if compgen -G '/sys/kernel/iommu_groups/*' >/dev/null; then
+    echo "${grn}IOMMU is on${rst} ($(find /sys/kernel/iommu_groups -mindepth 1 -maxdepth 1 | wc -l) groups)"
+else
+    echo "${red}IOMMU is OFF${rst}: enable SVM Mode and IOMMU in the MSI BIOS (OC > Advanced CPU Configuration / Advanced > AMD CBS > NBIO > IOMMU)"
+fi
+grep -q svm /proc/cpuinfo && echo "${grn}SVM (AMD-V) available${rst}" || echo "${red}SVM disabled in BIOS${rst}"
+
+group_of() { basename "$(readlink -f "/sys/bus/pci/devices/$1/iommu_group")" 2>/dev/null; }
+
+show_group() {
+    local label="$1" dev="$2" g d cls other=0
+    [[ -n "$dev" && -e "/sys/bus/pci/devices/$dev" ]] || { echo "${ylw}$label: not found${rst}"; return; }
+    g="$(group_of "$dev")"
+    echo
+    echo "${bold}$label${rst} $dev -> IOMMU group $g"
+    for d in /sys/kernel/iommu_groups/"$g"/devices/*; do
+        d="$(basename "$d")"
+        cls="$(cat "/sys/bus/pci/devices/$d/class")"
+        drv="$(basename "$(readlink -f "/sys/bus/pci/devices/$d/driver")" 2>/dev/null || echo none)"
+        printf '   %s  [%s]  driver=%s\n' "$(lspci -nns "$d" | cut -c1-110)" "$cls" "$drv"
+        # PCI bridges (class 0x0604) in the group are fine
+        [[ "${d%.*}" != "${dev%.*}" && "$cls" != 0x0604* ]] && other=1
+    done
+    if ((other)); then
+        echo "   ${ylw}Group contains other devices: they would have to be passed through too.${rst}"
+        echo "   ${ylw}Try another PCIe slot, or add pcie_acs_override=downstream,multifunction${rst}"
+        echo "   ${ylw}(the linux-cachyos kernel includes the ACS override patch; it weakens isolation).${rst}"
+    else
+        echo "   ${grn}isolated: OK for passthrough${rst}"
+    fi
+}
+
+show_group "RTX 3080" "${GPU_PCI:-$(lspci -D -n -d 10de: | awk '$2 ~ /^030[02]:/ {print $1; exit}')}"
+show_group "USB card" "${USB_CONTROLLER_PCI:-}"
+
+echo
+echo "${bold}All USB host controllers${rst} (pick yours for USB_CONTROLLER_PCI in $CONF):"
+lspci -D -nn | grep -i 'USB controller' | sed 's/^/   /'
+for c in /sys/bus/pci/devices/*; do
+    [[ "$(cat "$c/class")" == 0x0c03* ]] || continue
+    ports="$(find "$c" -maxdepth 3 -name 'usb[0-9]*' -type d 2>/dev/null | head -n2 | xargs -r -n1 basename | tr '\n' ' ')"
+    echo "   $(basename "$c") root hubs: ${ports:-?}  (lsusb -t shows what is plugged in where)"
+done
+
+echo
+echo "${bold}Resizable BAR${rst}: $(lspci -vv -s "${GPU_PCI:-01:00.0}" 2>/dev/null | grep -A2 'Physical Resizable BAR' | grep -o 'current size: [0-9A-Z]*' | head -n1 || echo unknown)"
+echo "   (If the VM shows Code 43 or won't POST with ReBAR on, disable it in BIOS or see README.)"
+echo
+echo "${bold}cachy-vfio config${rst} ($CONF):"
+[[ -f "$CONF" ]] && grep -vE '^\s*(#|$)' "$CONF" | sed 's/^/   /'

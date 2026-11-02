@@ -1,0 +1,14 @@
+[Unit]
+Description=Cachy setup: one-time first boot tasks
+Wants=network-online.target
+After=network-online.target libvirtd.service ollama.service tailscaled.service power-profiles-daemon.service
+ConditionPathExists=!/var/lib/cachy-setup/firstboot.done
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/cachy-setup/cachy-firstboot.sh
+TimeoutStartSec=infinity
+StandardOutput=journal
+
+[Install]
+WantedBy=multi-user.target

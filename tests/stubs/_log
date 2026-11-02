@@ -1,0 +1,2 @@
+# sourced by stubs
+echo "$(basename "$0") $*" >>"${STUB_DIR:-/tmp}/calls"

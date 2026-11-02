@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Switch between the two GPU passthrough layouts.
+#
+#   sudo cachy-vfio-mode              show the current mode
+#   sudo cachy-vfio-mode single       monitor on the RTX 3080 (best for Linux gaming).
+#                                     Starting the VM stops Cinnamon until it shuts down.
+#   sudo cachy-vfio-mode hybrid       monitor on the motherboard (7700X iGPU). Cinnamon
+#                                     stays up while the VM has the 3080; Linux games
+#                                     then run on the iGPU, CUDA/Ollama still use the 3080.
+#   add --no-restart to not restart LightDM (applies at next login/boot).
+set -euo pipefail
+CONF=/etc/cachy-vfio.conf
+XCONF=/etc/X11/xorg.conf.d/10-cachy-gpu.conf
+
+[[ -f "$CONF" ]] || { echo "$CONF missing: run post-install.sh 70-virtualization" >&2; exit 1; }
+# shellcheck source=/dev/null
+source "$CONF"
+
+mode="${1:-}"; restart=1
+[[ "${2:-}" == --no-restart || "${1:-}" == --no-restart ]] && restart=0
+[[ "$mode" == --no-restart ]] && mode=""
+
+if [[ -z "$mode" ]]; then
+    echo "current mode: ${MODE:-unknown}"
+    echo "GPU: $GPU_PCI   iGPU: ${IGPU_PCI:-not detected}   USB card: ${USB_CONTROLLER_PCI:-none}"
+    exit 0
+fi
+[[ $EUID -eq 0 ]] || { echo "run with sudo" >&2; exit 1; }
+
+busid() {   # 0000:01:00.0 -> PCI:1:0:0
+    local a="${1#*:}" b d f
+    b=${a%%:*}; a=${a#*:}; d=${a%%.*}; f=${a#*.}
+    printf 'PCI:%d:%d:%d' "$((16#$b))" "$((16#$d))" "$((16#$f))"
+}
+
+case "$mode" in
+single)
+    [[ -n "$GPU_PCI" ]] || { echo "no NVIDIA GPU configured in $CONF" >&2; exit 1; }
+    install -d "$(dirname "$XCONF")"
+    cat >"$XCONF" <<EOF
+# Managed by cachy-vfio-mode: SINGLE mode, desktop on the RTX 3080.
+# AutoAddGPU=false keeps Xorg off the iGPU so only one GPU drives the session.
+Section "ServerFlags"
+    Option "AutoAddGPU" "false"
+EndSection
+
+Section "Device"
+    Identifier "nvidia"
+    Driver     "nvidia"
+    BusID      "$(busid "$GPU_PCI")"
+EndSection
+EOF
+    ;;
+hybrid)
+    if [[ -z "${IGPU_PCI:-}" ]]; then
+        IGPU_PCI="$(lspci -D -n -d 1002: | awk '$2 ~ /^030[02]:/ {print $1; exit}')"
+    fi
+    if [[ -z "$IGPU_PCI" ]]; then
+        cat >&2 <<'EOF'
+The 7700X iGPU is not visible. In the MSI BIOS: Advanced > Integrated Graphics
+Configuration > Integrated Graphics = Force (or Enabled), save, reboot, retry.
+EOF
+        exit 1
+    fi
+    install -d "$(dirname "$XCONF")"
+    cat >"$XCONF" <<EOF
+# Managed by cachy-vfio-mode: HYBRID mode, desktop on the 7700X iGPU.
+# AutoAddGPU=false keeps Xorg from opening the 3080, so it can be handed to
+# the VM at any time without stopping the session.
+Section "ServerFlags"
+    Option "AutoAddGPU" "false"
+EndSection
+
+Section "Device"
+    Identifier "igpu"
+    Driver     "modesetting"
+    BusID      "$(busid "$IGPU_PCI")"
+EndSection
+EOF
+    ;;
+*) sed -n '2,12p' "$0"; exit 1 ;;
+esac
+
+sed -i -E "s/^MODE=.*/MODE=$mode/" "$CONF"
+grep -q '^IGPU_PCI=' "$CONF" && sed -i -E "s/^IGPU_PCI=.*/IGPU_PCI=${IGPU_PCI:-}/" "$CONF"
+echo "mode set to $mode"
+if [[ "$mode" == hybrid ]]; then
+    echo "Connect the monitor to the motherboard HDMI/DP. Optionally also set BIOS"
+    echo "'Initiate Graphic Adapter' to IGD so boot messages show there."
+else
+    echo "Connect the monitor to the RTX 3080 and set BIOS 'Initiate Graphic Adapter' to PEG."
+fi
+
+if ((restart)) && [[ -t 0 ]] && systemctl is-active --quiet display-manager.service; then
+    read -rp "Restart LightDM now (logs you out)? [y/N] " r
+    [[ "$r" =~ ^[Yy] ]] && systemctl restart display-manager.service
+fi
+exit 0

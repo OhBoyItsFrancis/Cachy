@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/_log"
+case "$1 $2" in "subvolume show") [[ -f "$3/.subvol" ]] ;; "subvolume create") mkdir -p "$3" && touch "$3/.subvol" ;; esac

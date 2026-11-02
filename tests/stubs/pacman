@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+source "$(dirname "$0")/_log"
+inst="$STUB_DIR/installed"; miss="$STUB_DIR/missing"; touch "$inst" "$miss"
+case "$1" in
+  -Qq|-Q) grep -qx "$2" "$inst" ;;
+  -S|-Sy|-Syu|-S*)
+    pkgs=(); for a in "${@:2}"; do [[ "$a" == -* ]] || pkgs+=("$a"); done
+    for p in "${pkgs[@]}"; do grep -qx "$p" "$miss" && { echo "error: target not found: $p" >&2; exit 1; }; done
+    printf '%s\n' "${pkgs[@]}" >>"$inst"; exit 0 ;;
+  *) exit 0 ;;
+esac
