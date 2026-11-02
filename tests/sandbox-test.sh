@@ -45,6 +45,7 @@ EOF
 echo '#unix_sock_group = "libvirt"' >/etc/libvirt/libvirtd.conf
 touch /usr/lib/systemd/user/figma-agent.socket
 id francis &>/dev/null || useradd -m -s /bin/bash francis
+mkdir -p /home/francis/.claude && echo "my own notes" >/home/francis/.claude/CLAUDE.md
 for g in libvirt kvm gamemode render; do getent group "$g" >/dev/null || groupadd "$g"; done
 
 cp "$REPO/config.example.env" "$WORK/config.env"
@@ -84,6 +85,8 @@ check "next steps file"               "[[ -f /home/francis/Desktop/NEXT-STEPS.tx
 echo "--- second run (idempotency) ---"
 /opt/cachy-src/post-install.sh --chroot >/dev/null 2>&1 || true
 check "kernel params still once"      "[[ \$(grep -o 'iommu=pt' /etc/default/limine | wc -l) -eq 1 ]]"
+check "claude pointer once, notes kept" "[[ \$(grep -c 'cachy-setup:begin' /home/francis/.claude/CLAUDE.md) -eq 1 ]] && grep -q 'my own notes' /home/francis/.claude/CLAUDE.md && grep -q /opt/cachy-setup/docs/SYSTEM.md /home/francis/.claude/CLAUDE.md"
+check "SYSTEM.md deployed"            "[[ -f /opt/cachy-setup/docs/SYSTEM.md ]]"
 check "libvirtd.conf no duplicates"   "[[ \$(grep -cx 'unix_sock_group = \"libvirt\"' /etc/libvirt/libvirtd.conf) -eq 1 ]]"
 
 echo "--- hybrid mode switch ---"

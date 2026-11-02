@@ -173,6 +173,11 @@ findmnt -R "$MNT" | tee -a "$CACHY_LOG"
 
 install -d "$MNT/opt/cachy-setup"
 rsync -a --delete --exclude .git "$CACHY_ROOT/" "$MNT/opt/cachy-setup/"
+# Full git clone in the user's home as the working copy for later tweaks
+# (ownership is fixed inside the chroot by modules/90-finish.sh)
+if [[ -d "$CACHY_ROOT/.git" && ! -e "$MNT/home/$USERNAME/Cachy" ]]; then
+    rsync -a "$CACHY_ROOT/" "$MNT/home/$USERNAME/Cachy/"
+fi
 # The live ISO's mirror ranking is better than nothing for the chroot
 [[ -f /etc/pacman.d/cachyos-mirrorlist ]] && cp /etc/pacman.d/cachyos-mirrorlist "$MNT/etc/pacman.d/" || true
 

@@ -7,6 +7,30 @@ if [[ "$(realpath "$CACHY_ROOT")" != /opt/cachy-setup ]]; then
 fi
 [[ -f /opt/cachy-setup/config.env ]] && chmod 0600 /opt/cachy-setup/config.env
 
+# Git working copy for future tweaks (install.sh puts one in ~/Cachy)
+if [[ -d "/home/$USERNAME/Cachy" ]]; then
+    chown -R "$USERNAME:" "/home/$USERNAME/Cachy"
+fi
+
+# Claude Code: a short pointer in the user's global memory, so every session on
+# this machine knows where the system documentation is. Replaced on re-runs.
+claude_md="/home/$USERNAME/.claude/CLAUDE.md"
+install -d "$(dirname "$claude_md")"
+touch "$claude_md"
+sed -i '/<!-- cachy-setup:begin -->/,/<!-- cachy-setup:end -->/d' "$claude_md"
+cat >>"$claude_md" <<'EOF'
+<!-- cachy-setup:begin -->
+## This machine (cachy-setup)
+This PC was installed and configured by cachy-setup: CachyOS + Cinnamon (X11), RTX 3080 with
+switchable single/hybrid GPU passthrough to a Windows 11 VM, gaming tweaks, Claude Code + Ollama.
+Before changing system configuration (packages, /etc, kernel parameters, drivers, services,
+libvirt/VFIO, Xorg), read /opt/cachy-setup/docs/SYSTEM.md and follow its section 0.
+Make lasting changes in the git working copy ~/Cachy (running `claude` there loads the full doc),
+then deploy and re-run the affected module.
+<!-- cachy-setup:end -->
+EOF
+chown -R "$USERNAME:" "/home/$USERNAME/.claude"
+
 desk="/home/$USERNAME/Desktop"
 install -d "$desk"
 write_file "$desk/NEXT-STEPS.txt" <<EOF
