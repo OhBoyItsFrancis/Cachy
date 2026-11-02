@@ -56,6 +56,8 @@ Update the BIOS first (MSI site → PRO B650-S WIFI → BIOS), then:
 
 ## Install (fully automated path)
 
+Step-by-step walkthrough with every variable explained: **[docs/install-guide.md](docs/install-guide.md)**.
+
 1. Download the CachyOS **Desktop** ISO from <https://cachyos.org/download/> and write it to a USB stick.
 2. Boot it (F11 on MSI boards for the boot menu), connect to the network (Wi-Fi: `nmtui`).
 3. Open a terminal:
