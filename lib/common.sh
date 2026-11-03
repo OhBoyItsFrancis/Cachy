@@ -49,17 +49,35 @@ load_config() {
 #      the databases and retry with a full upgrade (-Syyu, never a partial
 #      upgrade). That covers mirrors that haven't finished syncing, the usual
 #      cause of "failed retrieving file" / "not found" on CachyOS.
-#   3. anything still failing is reported together with pacman's own error lines.
-_pacman_s() {   # _pacman_s FLAGS pkg... ; full output -> log, last output kept
-    local flags="$1"; shift
-    pacman "-S$flags" --needed --noconfirm "$@" >"$CACHY_STATE/last-pacman" 2>&1
+#   3. if pacman says installing X "breaks dependency ... required by Y" (a split
+#      package only partly on the mirror), install Y from the same repo as X
+#   4. anything still failing is reported together with pacman's own error lines.
+_pacman_run() {   # _pacman_run ARGS... ; full output -> log, last output kept for _pacman_reason
+    pacman "$@" >"$CACHY_STATE/last-pacman" 2>&1
     local rc=$?
     cat "$CACHY_STATE/last-pacman" >>"$CACHY_LOG"
     return $rc
 }
+_pacman_s() {   # _pacman_s FLAGS pkg...  ->  pacman -S<FLAGS> --needed --noconfirm pkg...
+    local flags="$1"; shift
+    _pacman_run "-S$flags" --needed --noconfirm "$@"
+}
+# Mirror half-synced: pacman reports
+#   :: installing libnma-common (1.10.6-3) breaks dependency 'libnma-common=1.10.6-3.1' required by libnma-gtk4
+# i.e. one repo (CachyOS) has only part of a split package, so the rest comes
+# from another repo (Arch) at a different pkgrel. Print "<repo>/<pkg>" for each
+# installed package that has to come from the same repo as the one pacman picked.
+_split_pkg_fixups() {
+    local a v b repo
+    while read -r a v b; do
+        repo=$(pacman -Sl 2>/dev/null | awk -v n="$a" -v ver="$v" '$2 == n && $3 == ver {print $1; exit}')
+        [[ -n "$repo" ]] && echo "$repo/$b"
+    done < <(sed -nE "s/^:: installing ([^ ]+) \(([^)]+)\) breaks dependency '[^']*' required by ([^ ]+)$/\1 \2 \3/p" \
+             "$CACHY_STATE/last-pacman") | sort -u
+}
 _pacman_reason() {
     local r
-    r=$(grep -E '^(error:|:: .*(conflict|corrupt)|.* exists in filesystem|warning: .*(conflict|unknown trust|corrupt))' \
+    r=$(grep -E '^(error:|:: .*(conflict|corrupt|breaks dependency)|.* exists in filesystem|warning: .*(conflict|unknown trust|corrupt))' \
         "$CACHY_STATE/last-pacman" | grep -v 'failed to commit transaction' | head -n 4 | tr '\n' ' ')
     echo "${r:-pacman exited with an error (see log)}" | cut -c1-400
 }
@@ -83,11 +101,19 @@ pkg_install() {
     ((${#retry[@]})) || return 0
     _refresh_mirrors_once
     info "refreshing package databases and retrying: ${retry[*]}"
+    local fix=()
     for p in "${retry[@]}"; do
-        if ! _pacman_s "yyu" "$p"; then
-            warn "could not install $p: $(_pacman_reason)"
-            echo "$p" >>"$CACHY_STATE/failed"
+        _pacman_s "yyu" "$p" && continue
+        # Split package only half on the mirror: take the clashing installed
+        # package(s) from the same repo too, so the set matches (a later -Syu
+        # moves them back to the CachyOS build once the mirror catches up).
+        mapfile -t fix < <(_split_pkg_fixups)
+        if ((${#fix[@]})); then
+            info "$p: mirror has a split package only in part; also installing ${fix[*]}"
+            _pacman_run -S --noconfirm "$p" "${fix[@]}" && continue
         fi
+        warn "could not install $p: $(_pacman_reason)"
+        echo "$p" >>"$CACHY_STATE/failed"
     done
 }
 

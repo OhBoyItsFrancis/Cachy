@@ -26,7 +26,10 @@ mkdir -p "$STUB_DIR"
 echo "scx-scheds" >"$STUB_DIR/missing"
 # ...and these fail to download until the databases are force-refreshed
 # (a mirror that hasn't finished syncing), to exercise the -Syyu retry
-printf '%s\n' cinnamon network-manager-applet >"$STUB_DIR/flaky"
+echo cinnamon >"$STUB_DIR/flaky"
+# ...and this one hits a half-synced split package (the real failure seen on
+# this machine: libnma-gtk4 -3.1 installed, mirror only had Arch's libnma-common -3)
+echo "network-manager-applet libnma-common 1.10.6-3 libnma-gtk4" >"$STUB_DIR/splitbreak"
 
 # Minimal Arch-like files the modules edit
 mkdir -p /etc/default /etc/libvirt /usr/lib/systemd/user
@@ -71,6 +74,7 @@ check "missing pkg reported"          "grep -q scx-scheds /tmp/cachy-setup-state
 check "failure reason shown"          "grep -q 'could not install scx-scheds: error: target not found: scx-scheds' /tmp/cachy-setup-state/warnings"
 check "flaky pkgs retried with -Syyu" "grep -q 'pacman -Syyu --needed --noconfirm cinnamon' $STUB_DIR/calls && grep -qx cinnamon $STUB_DIR/installed"
 check "flaky pkgs not reported"       "! grep -qx -e cinnamon -e network-manager-applet /tmp/cachy-setup-state/failed"
+check "split pkg aligned from one repo" "grep -q 'pacman -S --noconfirm network-manager-applet extra/libnma-gtk4' $STUB_DIR/calls && grep -qx network-manager-applet $STUB_DIR/installed"
 check "mirrors re-ranked once"        "[[ \$(grep -c '^cachyos-rate-mirrors' $STUB_DIR/calls) -eq 1 ]]"
 check "pipewire-jack not requested"   "! grep -q 'pipewire-jack' $STUB_DIR/calls"
 check "nvidia modprobe options"       "grep -q NVreg_PreserveVideoMemoryAllocations=1 /etc/modprobe.d/cachy-nvidia.conf"

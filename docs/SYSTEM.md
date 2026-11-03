@@ -109,7 +109,7 @@ Target user: `CACHY_USER` (set by install.sh), else config `USERNAME` if that us
 
 | Helper | Does |
 |---|---|
-| `pkg_install a b …` | `pacman -S --needed --noconfirm`. If the group fails it retries one by one; packages still failing get one more try after `cachyos-rate-mirrors` (once per run) and `pacman -Syyu`. Final failures go to `$CACHY_STATE/failed`, and the warning includes pacman's own `error:` lines. |
+| `pkg_install a b …` | `pacman -S --needed --noconfirm`. If the group fails it retries one by one; packages still failing get one more try after `cachyos-rate-mirrors` (once per run) and `pacman -Syyu`. If pacman then reports `installing X breaks dependency … required by Y` (a split package only partly synced on the mirror), it installs Y from the same repo as X. Final failures go to `$CACHY_STATE/failed`, and the warning includes pacman's own `error:` lines. |
 | `aur_install a …` | builds with `paru` as the user, using a temporary NOPASSWD sudoers file (`/etc/sudoers.d/99-cachy-setup-aur`) that is always removed |
 | `svc_enable` / `svc_disable` | `enable` (adds `--now` when not in a chroot) / `disable` + `stop` |
 | `user_svc_enable` | `systemctl --global enable` (for all users) |
@@ -459,9 +459,13 @@ Install-time logs that were copied in: `/var/log/cachy-install-stage1.log`, `/va
   - the headless installer's behaviour on the ISO's version
   - the `limine-snapper-sync` unit name
   - `glib-compile-schemas` accepting every key in the override
-  - packages failing at install time even though the repos look consistent afterwards (seen once:
-    `cinnamon`, `network-manager-applet`, `btrfs-assistant`; most likely a mirror mid-sync). The
-    refresh-and-retry in `pkg_install` exists for this. The real error is in `/var/log/cachy-setup.log`.
+  - **Half-synced CachyOS mirrors (seen on the first real install).** `cinnamon` and
+    `network-manager-applet` failed with
+    `installing libnma-common (1.10.6-3) breaks dependency 'libnma-common=1.10.6-3.1' required by libnma-gtk4`.
+    The mirror's `cachyos-extra-znver4` had CachyOS's `libnma-gtk4` but not the matching `libnma` /
+    `libnma-common`, so pacman took Arch's at a different pkgrel. `pkg_install` now re-ranks mirrors
+    and aligns such sets automatically. By hand: `sudo cachyos-rate-mirrors && sudo pacman -Syyu`, or
+    install the whole set from one repo (`sudo pacman -S extra/libnma extra/libnma-common extra/libnma-gtk4`).
 - `detect_usb_controller_pci` gives up if there are zero or several non-AMD USB controllers; then
   `USB_CONTROLLER_PCI` must be set by hand.
 - MSI BIOS menu paths in the docs are typical, not confirmed for this board's BIOS version.

@@ -3,14 +3,26 @@
 #   installed  package names "installed"
 #   missing    names that don't exist in any repo ("target not found")
 #   flaky      names whose download fails until a forced refresh (-Syy...)
+#   splitbreak "TARGET A VER B": installing TARGET breaks B (half-synced split
+#              package) unless repo/B is part of the same transaction
 source "$(dirname "$0")/_log"
 inst="$STUB_DIR/installed"; miss="$STUB_DIR/missing"; flaky="$STUB_DIR/flaky"
 touch "$inst" "$miss" "$flaky"
+touch "$STUB_DIR/splitbreak"
 case "$1" in
+  -Sl) awk '{print "extra", $2, $3}' "$STUB_DIR/splitbreak" ;;
   -Qq|-Q) shift; for p in "$@"; do grep -qx "$p" "$inst" || exit 1; done ;;
   -S*)
     [[ "$1" == *yy* ]] && touch "$STUB_DIR/refreshed"
     pkgs=(); for a in "${@:2}"; do [[ "$a" == -* ]] || pkgs+=("$a"); done
+    while read -r tgt a ver b; do
+      if [[ " ${pkgs[*]} " == *" $tgt "* && " ${pkgs[*]} " != *"/$b "* ]]; then
+        echo "error: failed to prepare transaction (could not satisfy dependencies)" >&2
+        echo ":: installing $a ($ver) breaks dependency '$a=$ver.1' required by $b" >&2
+        exit 1
+      fi
+    done <"$STUB_DIR/splitbreak"
+    pkgs=("${pkgs[@]#*/}")
     for p in "${pkgs[@]}"; do
       if grep -qx "$p" "$miss"; then echo "error: target not found: $p" >&2; exit 1; fi
       if grep -qx "$p" "$flaky" && [[ ! -e "$STUB_DIR/refreshed" ]]; then
