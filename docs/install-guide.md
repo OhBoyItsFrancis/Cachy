@@ -340,11 +340,18 @@ is right**. Run it from the root shell where you exported the passwords.
 
 ### Logs
 
-| While installing (live system) | After install (new system) |
+| On the live USB (until you reboot) | On the installed system |
 |---|---|
 | `/tmp/cachy-install.log` (this script) | `/var/log/cachy-install-stage1.log` |
 | `/tmp/cachyos-install.log` (CachyOS installer) | `/var/log/cachyos-installer.log` |
-| — | `/var/log/cachy-setup.log` (post-install modules) |
+| `/tmp/cachy-setup.log` (post-install modules, copied at the end) | `/var/log/cachy-setup.log` |
+
+The summary's "Full log: /var/log/cachy-setup.log" means the path **on the installed system**. On
+the live USB, use `/tmp/cachy-setup.log`. To see why a package failed:
+
+```bash
+grep -n -A6 'could not install' /tmp/cachy-setup.log
+```
 
 To follow along in a second terminal:
 
@@ -406,10 +413,41 @@ grep -i -E 'warn|fail' /var/log/cachy-setup.log
 | `… is not a block device` / `not a whole disk` | Re-check `TARGET_DISK` with `lsblk -d`: whole disk, with `/dev/`. |
 | `has mounted partitions` | The live desktop auto-mounted it, or a failed earlier attempt left it mounted. Unmount with `sudo umount -R /mnt` and `sudo umount /dev/nvme0n1p*`, then retry. |
 | `cachyos-installer failed` | Read `/tmp/cachyos-install.log`. The disk may be half-written, which is fine: re-running erases it again. If it keeps failing, use the **GUI fallback** below. |
-| Stage 2 warnings / failed packages | Boot the new system and re-run just that part: `sudo /opt/cachy-setup/post-install.sh 40-gaming` (modules are safe to re-run). |
+| Stage 2 warnings / failed packages | Each warning now quotes pacman's error. Install the package by hand so you can answer its prompts (`sudo pacman -Syu <pkg>`), then re-run that module: `sudo /opt/cachy-setup/post-install.sh 30-desktop` (modules are safe to re-run). |
+| `Cinnamon/LightDM are NOT installed` at the end | Don't reboot yet. Follow the commands it prints: mount the new system, run `pacman -Syu cinnamon …` in `arch-chroot` interactively, re-run `30-desktop`. Already rebooted? See [No desktop after reboot](#no-desktop-after-reboot). |
 | Black screen after login (single mode) | Monitor on the 3080? Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F3</kbd>, log in, run `sudo cachy-vfio-mode single`, then reboot. |
 | Black screen (hybrid mode) | Monitor on the motherboard? Is the iGPU enabled in BIOS? Or switch back: `sudo cachy-vfio-mode single`. |
 | Update broke boot later | Pick an older snapshot under **Snapshots** in the Limine menu. |
+
+### No desktop after reboot
+
+If Cinnamon wasn't installed, LightDM either doesn't start or bounces you back to the login screen.
+
+1. Press <kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>F3</kbd> and log in on the text console with your
+   user name and password.
+2. Get online if needed (Ethernet is automatic):
+   ```bash
+   nmtui
+   ```
+3. See what went wrong during setup:
+   ```bash
+   grep -n -A6 'could not install' /var/log/cachy-setup.log
+   ```
+4. Install the desktop interactively, so pacman shows its error and you can answer prompts:
+   ```bash
+   sudo pacman -Syu cinnamon network-manager-applet lightdm
+   ```
+5. Update the setup scripts and re-apply the desktop module:
+   ```bash
+   cd ~/Cachy && git pull && sudo rsync -a --exclude .git ~/Cachy/ /opt/cachy-setup/
+   ```
+   ```bash
+   sudo /opt/cachy-setup/post-install.sh 30-desktop
+   ```
+6. Start the login screen:
+   ```bash
+   sudo systemctl restart lightdm
+   ```
 
 ### GUI fallback
 

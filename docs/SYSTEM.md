@@ -109,7 +109,7 @@ Target user: `CACHY_USER` (set by install.sh), else config `USERNAME` if that us
 
 | Helper | Does |
 |---|---|
-| `pkg_install a b …` | `pacman -S --needed --noconfirm`; if the group fails, retries one by one and records failures in `$CACHY_STATE/failed` |
+| `pkg_install a b …` | `pacman -S --needed --noconfirm`. If the group fails it retries one by one; packages still failing get one more try after `cachyos-rate-mirrors` (once per run) and `pacman -Syyu`. Final failures go to `$CACHY_STATE/failed`, and the warning includes pacman's own `error:` lines. |
 | `aur_install a …` | builds with `paru` as the user, using a temporary NOPASSWD sudoers file (`/etc/sudoers.d/99-cachy-setup-aur`) that is always removed |
 | `svc_enable` / `svc_disable` | `enable` (adds `--now` when not in a chroot) / `disable` + `stop` |
 | `user_svc_enable` | `systemctl --global enable` (for all users) |
@@ -142,7 +142,10 @@ Runs `chwd -a -f` if `nvidia-utils` is missing.
   nemo-fileroller nemo-share file-roller xed xreader xviewer gnome-terminal gnome-calculator
   gnome-system-monitor gnome-disk-utility gnome-screenshot gnome-keyring seahorse blueman
   network-manager-applet system-config-printer`
-- Audio: `pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber pavucontrol`
+- Audio: `pipewire pipewire-pulse pipewire-alsa wireplumber pavucontrol`. Not `pipewire-jack`: it
+  conflicts with `jack2`, which `vlc-plugins-all` already pulls in, and `--noconfirm` won't replace it.
+- After installing, the module **fails loudly** (`CRITICAL`, exit 1) if `cinnamon` or `lightdm`
+  isn't installed, and `install.sh` prints recovery steps instead of telling you to reboot.
 - Look and fonts: `papirus-icon-theme noto-fonts noto-fonts-emoji noto-fonts-cjk
   ttf-jetbrains-mono-nerd`
 - Misc: `xdg-user-dirs xclip`
@@ -261,8 +264,8 @@ installed but not configured.
 
 ### 8.3 Desktop
 Cinnamon on LightDM + slick-greeter, with Papirus-Dark and Adwaita-dark, a flat mouse
-acceleration profile, and fish as the login shell. PipeWire handles audio, JACK included via
-`pipewire-jack`.
+acceleration profile, and fish as the login shell. PipeWire handles audio. JACK apps use `jack2`;
+switching to `pipewire-jack` means replacing `jack2` (`sudo pacman -S pipewire-jack`, answer *y*).
 
 ### 8.4 Gaming
 CachyOS kernel (BORE), `ntsync`, proton-cachyos, GE-Proton, GameMode, MangoHud, Gamescope,
@@ -456,7 +459,9 @@ Install-time logs that were copied in: `/var/log/cachy-install-stage1.log`, `/va
   - the headless installer's behaviour on the ISO's version
   - the `limine-snapper-sync` unit name
   - `glib-compile-schemas` accepting every key in the override
-  - `pipewire-jack` vs `jack2` conflicts
+  - packages failing at install time even though the repos look consistent afterwards (seen once:
+    `cinnamon`, `network-manager-applet`, `btrfs-assistant`; most likely a mirror mid-sync). The
+    refresh-and-retry in `pkg_install` exists for this. The real error is in `/var/log/cachy-setup.log`.
 - `detect_usb_controller_pci` gives up if there are zero or several non-AMD USB controllers; then
   `USB_CONTROLLER_PCI` must be set by hand.
 - MSI BIOS menu paths in the docs are typical, not confirmed for this board's BIOS version.

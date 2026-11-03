@@ -7,9 +7,22 @@ pkg_install cinnamon cinnamon-translations lightdm lightdm-slick-greeter \
     xed xreader xviewer gnome-terminal gnome-calculator gnome-system-monitor \
     gnome-disk-utility gnome-screenshot gnome-keyring seahorse \
     blueman network-manager-applet system-config-printer \
-    pipewire pipewire-pulse pipewire-alsa pipewire-jack wireplumber pavucontrol \
+    pipewire pipewire-pulse pipewire-alsa wireplumber pavucontrol \
     papirus-icon-theme noto-fonts noto-fonts-emoji noto-fonts-cjk ttf-jetbrains-mono-nerd \
     xdg-user-dirs xclip
+
+# pipewire-jack is left out on purpose: it conflicts with jack2, which is
+# already installed (vlc-plugins-all -> vlc-plugin-jack), and pacman
+# --noconfirm refuses to remove jack2. Nothing in this setup needs it.
+
+# The desktop is not optional: stop here, loudly, if it isn't installed.
+missing=()
+for p in cinnamon lightdm; do pkg_installed "$p" || missing+=("$p"); done
+if ((${#missing[@]})); then
+    warn "CRITICAL: ${missing[*]} not installed, so there is no desktop to log into. Fix: sudo pacman -Syu ${missing[*]} (read its error), then sudo /opt/cachy-setup/post-install.sh 30-desktop"
+    echo "${missing[*]}" >"$CACHY_STATE/critical"
+    exit 1
+fi
 
 # ---- LightDM ------------------------------------------------------------------
 install -d /etc/lightdm/lightdm.conf.d

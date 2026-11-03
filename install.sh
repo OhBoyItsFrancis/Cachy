@@ -170,6 +170,7 @@ mount -o subvol=@ "$ROOT_PART" "$MNT" || die "could not mount $ROOT_PART (subvol
 # Mount the rest (@home, @cache, @log, /boot, ...) exactly as the new fstab says
 mount --all --fstab "$MNT/etc/fstab" --target-prefix "$MNT" || die "could not mount target fstab entries"
 findmnt -R "$MNT" | tee -a "$CACHY_LOG"
+mountpoint -q "$MNT/var/log" || warn "$MNT/var/log is not a separate mount (no @log subvolume?); logs will land in @"
 
 install -d "$MNT/opt/cachy-setup"
 rsync -a --delete --exclude .git "$CACHY_ROOT/" "$MNT/opt/cachy-setup/"
@@ -188,11 +189,45 @@ rc=$?
 set -e
 cp "$CACHY_LOG" "$MNT/var/log/cachy-install-stage1.log" 2>/dev/null || true
 cp /tmp/cachyos-install.log "$MNT/var/log/cachyos-installer.log" 2>/dev/null || true
+# Keep a copy of the stage-2 log on the live system: the target is unmounted below
+cp "$MNT/var/log/cachy-setup.log" /tmp/cachy-setup.log 2>/dev/null || true
+
+# Is there a desktop to boot into?
+desktop_ok=1
+if ! arch-chroot "$MNT" pacman -Q cinnamon lightdm >>"$CACHY_LOG" 2>&1; then
+    desktop_ok=0
+fi
 
 sync
 umount -R "$MNT"
 if ((rc != 0)); then
     warn "post-install finished with errors (rc=$rc). Boot the system and re-run: sudo /opt/cachy-setup/post-install.sh"
+fi
+
+section "Logs"
+cat <<EOF
+On this live USB (gone after reboot):
+  /tmp/cachy-install.log     this script
+  /tmp/cachyos-install.log   CachyOS installer (stage 1)
+  /tmp/cachy-setup.log       post-install modules (stage 2)
+On the installed system:
+  /var/log/cachy-setup.log, /var/log/cachy-install-stage1.log, /var/log/cachyos-installer.log
+Why a package failed:  grep -n -A6 'could not install' /tmp/cachy-setup.log
+EOF
+
+if ((!desktop_ok)); then
+    cat <<EOF
+
+${C_RED}${C_BLD}!! Cinnamon/LightDM are NOT installed: the new system has no desktop yet.${C_RST}
+Fix it before rebooting (the target is still configured, just unmounted):
+  sudo mount -o subvol=@ $ROOT_PART /mnt
+  sudo mount --all --fstab /mnt/etc/fstab --target-prefix /mnt
+  sudo arch-chroot /mnt pacman -Syu cinnamon cinnamon-session lightdm network-manager-applet
+  sudo arch-chroot /mnt env CACHY_USER=$USERNAME /opt/cachy-setup/post-install.sh 30-desktop
+  sudo umount -R /mnt
+pacman runs interactively there, so you see and can answer whatever stopped it.
+EOF
+    exit 1
 fi
 
 section "Done"

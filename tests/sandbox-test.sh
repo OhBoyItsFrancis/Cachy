@@ -24,6 +24,9 @@ export PATH="$REPO/tests/stubs:$PATH" STUB_DIR="$WORK/stub" CACHY_LOG=/var/log/c
 mkdir -p "$STUB_DIR"
 # Pretend these don't exist in the repos, to exercise the retry/fallback path
 echo "scx-scheds" >"$STUB_DIR/missing"
+# ...and these fail to download until the databases are force-refreshed
+# (a mirror that hasn't finished syncing), to exercise the -Syyu retry
+printf '%s\n' cinnamon network-manager-applet >"$STUB_DIR/flaky"
 
 # Minimal Arch-like files the modules edit
 mkdir -p /etc/default /etc/libvirt /usr/lib/systemd/user
@@ -65,6 +68,11 @@ check "existing params kept"          "grep -q 'rootflags=subvol=/@ quiet splash
 check "boot entries regenerated"      "grep -q '^limine-mkinitcpio' $STUB_DIR/calls"
 check "pacman tuned"                  "grep -q '^ParallelDownloads = 10' /etc/pacman.conf && grep -q '^Color' /etc/pacman.conf"
 check "missing pkg reported"          "grep -q scx-scheds /tmp/cachy-setup-state/failed"
+check "failure reason shown"          "grep -q 'could not install scx-scheds: error: target not found: scx-scheds' /tmp/cachy-setup-state/warnings"
+check "flaky pkgs retried with -Syyu" "grep -q 'pacman -Syyu --needed --noconfirm cinnamon' $STUB_DIR/calls && grep -qx cinnamon $STUB_DIR/installed"
+check "flaky pkgs not reported"       "! grep -qx -e cinnamon -e network-manager-applet /tmp/cachy-setup-state/failed"
+check "mirrors re-ranked once"        "[[ \$(grep -c '^cachyos-rate-mirrors' $STUB_DIR/calls) -eq 1 ]]"
+check "pipewire-jack not requested"   "! grep -q 'pipewire-jack' $STUB_DIR/calls"
 check "nvidia modprobe options"       "grep -q NVreg_PreserveVideoMemoryAllocations=1 /etc/modprobe.d/cachy-nvidia.conf"
 check "gaming sysctl"                 "grep -q 'vm.max_map_count = 2147483642' /etc/sysctl.d/80-cachy-gaming.conf"
 check "lightdm slick greeter"         "grep -q lightdm-slick-greeter /etc/lightdm/lightdm.conf.d/50-cachy.conf"
@@ -93,6 +101,11 @@ echo "--- hybrid mode switch ---"
 cachy-vfio-mode hybrid --no-restart >/dev/null
 check "xorg hybrid on iGPU"           "grep -q 'BusID      \"PCI:14:0:0\"' /etc/X11/xorg.conf.d/10-cachy-gpu.conf && grep -q '^MODE=hybrid' /etc/cachy-vfio.conf"
 cachy-vfio-mode single --no-restart >/dev/null
+
+echo "--- desktop that cannot be installed ---"
+sed -i '/^cinnamon$/d' "$STUB_DIR/installed"; echo cinnamon >>"$STUB_DIR/missing"
+set +e; /opt/cachy-src/post-install.sh --chroot 30-desktop >/dev/null 2>&1; rc30=$?; set -e
+check "30-desktop fails without cinnamon" "[[ $rc30 -ne 0 ]] && grep -q 'CRITICAL: cinnamon' /tmp/cachy-setup-state/warnings"
 
 if [[ "$SHELL_AFTER" == --shell ]]; then bash -i; fi
 ((fail == 0)) && echo "ALL PASSED" || { echo "SOME CHECKS FAILED (log: tail of $CACHY_LOG below)"; tail -n 40 "$CACHY_LOG"; exit 1; }

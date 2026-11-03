@@ -43,19 +43,49 @@ load_config() {
 
 # ---- packages ------------------------------------------------------------------
 
-# pkg_install pkg... : install with pacman; on transaction failure retry one by
-# one so a single missing/renamed package doesn't sink the whole group.
+# pkg_install pkg... : install with pacman. On failure:
+#   1. retry one by one, so one bad package doesn't sink the whole group
+#   2. for the ones still failing: re-rank mirrors (once per run), force-refresh
+#      the databases and retry with a full upgrade (-Syyu, never a partial
+#      upgrade). That covers mirrors that haven't finished syncing, the usual
+#      cause of "failed retrieving file" / "not found" on CachyOS.
+#   3. anything still failing is reported together with pacman's own error lines.
+_pacman_s() {   # _pacman_s FLAGS pkg... ; full output -> log, last output kept
+    local flags="$1"; shift
+    pacman "-S$flags" --needed --noconfirm "$@" >"$CACHY_STATE/last-pacman" 2>&1
+    local rc=$?
+    cat "$CACHY_STATE/last-pacman" >>"$CACHY_LOG"
+    return $rc
+}
+_pacman_reason() {
+    local r
+    r=$(grep -E '^(error:|:: .*(conflict|corrupt)|.* exists in filesystem|warning: .*(conflict|unknown trust|corrupt))' \
+        "$CACHY_STATE/last-pacman" | grep -v 'failed to commit transaction' | head -n 4 | tr '\n' ' ')
+    echo "${r:-pacman exited with an error (see log)}" | cut -c1-400
+}
+_refresh_mirrors_once() {
+    [[ -e "$CACHY_STATE/mirrors-refreshed" ]] && return 0
+    touch "$CACHY_STATE/mirrors-refreshed"
+    if command -v cachyos-rate-mirrors &>/dev/null; then
+        info "re-ranking CachyOS mirrors (cachyos-rate-mirrors)"
+        timeout 300 cachyos-rate-mirrors >>"$CACHY_LOG" 2>&1 || warn "cachyos-rate-mirrors failed, keeping current mirrors"
+    fi
+}
 pkg_install() {
-    local pkgs=("$@") p
+    local pkgs=("$@") p retry=()
     ((${#pkgs[@]})) || return 0
     info "pacman: ${pkgs[*]}"
-    if pacman -S --needed --noconfirm "${pkgs[@]}" >>"$CACHY_LOG" 2>&1; then
-        return 0
-    fi
-    warn "group install failed, retrying packages individually"
+    _pacman_s "" "${pkgs[@]}" && return 0
+    info "group install failed ($(_pacman_reason)); retrying packages one by one"
     for p in "${pkgs[@]}"; do
-        if ! pacman -S --needed --noconfirm "$p" >>"$CACHY_LOG" 2>&1; then
-            warn "could not install $p"
+        _pacman_s "" "$p" || retry+=("$p")
+    done
+    ((${#retry[@]})) || return 0
+    _refresh_mirrors_once
+    info "refreshing package databases and retrying: ${retry[*]}"
+    for p in "${retry[@]}"; do
+        if ! _pacman_s "yyu" "$p"; then
+            warn "could not install $p: $(_pacman_reason)"
             echo "$p" >>"$CACHY_STATE/failed"
         fi
     done
@@ -238,5 +268,9 @@ summary_report() {
         printf '%sWarnings:%s\n' "$C_YLW" "$C_RST"
         sed 's/^/  - /' "$CACHY_STATE/warnings"
     fi
-    echo "Full log: $CACHY_LOG"
+    if in_chroot; then
+        echo "Full log: $CACHY_LOG on the installed system (install.sh also copies it to /tmp/cachy-setup.log on the live USB)"
+    else
+        echo "Full log: $CACHY_LOG"
+    fi
 }
